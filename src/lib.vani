@@ -1,0 +1,436 @@
+// vani-sparse  v0.1.0 — sparse matrix formats and operations
+//
+// IMPORTANT — do NOT reimplement vāṇी compiler builtins.
+// Already available as builtins (call directly, never redeclare here):
+//   abs  push pop len set vec
+//
+// Depends on vani-matrix (mat_vec_mul, mat_transpose, mat_mul used only in
+// this package's own cross-checked tests, not in src/lib.vani itself --
+// v0.1.0's sparse operations are self-contained) -- see [deps] in vani.toml.
+// vani-matrix is still listed as a real dependency because every operation
+// here is validated by converting to/from a dense vani-matrix matrix and
+// comparing against the equivalent dense op (see tests/), which is by far
+// the strongest correctness check available for sparse code.
+//
+// ENCODING: two struct types, each with explicit named fields (no hidden
+// metadata, matching this ecosystem's convention -- structs with Vec
+// fields are supported by the compiler, confirmed while designing this
+// package, so dimensions live as plain i64 fields alongside the data
+// rather than needing separate function arguments everywhere):
+//
+//   struct SparseCOO { rows: Vec<i64>, cols: Vec<i64>, vals: Vec<f64>,
+//                       n_rows: i64, n_cols: i64 }
+//     Coordinate list -- the easy-to-BUILD format. Push (row, col, val)
+//     triples in any order; duplicates at the same (row, col) are allowed
+//     and get summed when converted to CSR. Not efficient to operate on
+//     directly -- convert to CSR first.
+//
+//   struct SparseCSR { row_ptr: Vec<i64> (length n_rows+1), col_idx: Vec<i64>,
+//                       vals: Vec<f64>, n_rows: i64, n_cols: i64 }
+//     Compressed sparse row -- the efficient format every operation in
+//     this package works on. Row i's entries are col_idx[row_ptr[i] ..
+//     row_ptr[i+1]] / vals[row_ptr[i] .. row_ptr[i+1]], sorted by column
+//     within each row (sorted order enables sparse_csr_get without a full
+//     row scan degrading, and is what the add/matmul algorithms below
+//     assume when merging rows via COO).
+//
+// DESIGN DECISION: sparse_csr_matmul uses Gustavson's algorithm (row-by-row
+// with a dense length-n_cols accumulator, reset after each output row) --
+// simple to get right and correct at this library's "modest size" scope,
+// though its per-row accumulator reset costs O(n_cols) regardless of how
+// sparse the result is. A CSR-native merge-based algorithm without the
+// dense accumulator would scale better to very wide matrices; not needed
+// yet, see TODO.md.
+use "../vendor/matrix/src/lib.vani";
+
+struct SparseCOO {
+    rows: Vec<i64>,
+    cols: Vec<i64>,
+    vals: Vec<f64>,
+    n_rows: i64,
+    n_cols: i64,
+}
+
+struct SparseCSR {
+    row_ptr: Vec<i64>,
+    col_idx: Vec<i64>,
+    vals: Vec<f64>,
+    n_rows: i64,
+    n_cols: i64,
+}
+
+// ── Construction ──────────────────────────────────────────────────────────────
+
+// Empty n_rows x n_cols matrix in COO form, ready for sparse_coo_push.
+#[bounded_stack(bytes = 152)]
+fn sparse_coo_new(n_rows: i64, n_cols: i64) -> SparseCOO {
+    let r: Vec<i64> = vec();
+    let c: Vec<i64> = vec();
+    let v: Vec<f64> = vec();
+    return SparseCOO { rows: r, cols: c, vals: v, n_rows: n_rows, n_cols: n_cols };
+}
+
+// Append one (row, col, val) entry. Duplicates at the same position are
+// allowed -- summed together by sparse_coo_to_csr. Returns 0 (unit
+// substitute); m must be a mut ref parameter, matching vani-matrix's
+// mat_set convention.
+#[bounded_stack(bytes = 72)]
+fn sparse_coo_push(m: mut ref SparseCOO, row: i64, col: i64, val: f64) -> i64 {
+    push(mut ref m.rows, row);
+    push(mut ref m.cols, col);
+    push(mut ref m.vals, val);
+    return 0;
+}
+
+// n x n sparse identity matrix, directly in CSR form.
+#[bounded_stack(bytes = 160)]
+fn sparse_identity_csr(n: i64) -> SparseCSR {
+    let row_ptr: Vec<i64> = vec();
+    let col_idx: Vec<i64> = vec();
+    let vals: Vec<f64> = vec();
+    let i: i64 = 0;
+    while i < n {
+        push(mut ref row_ptr, i);
+        push(mut ref col_idx, i);
+        push(mut ref vals, 1.0);
+        i = i + 1;
+    }
+    push(mut ref row_ptr, n);
+    return SparseCSR { row_ptr: row_ptr, col_idx: col_idx, vals: vals, n_rows: n, n_cols: n };
+}
+
+// ── Private helpers ───────────────────────────────────────────────────────────
+
+#[bounded_stack(bytes = 112)]
+fn _copy_i64(x: ref Vec<i64>) -> Vec<i64> {
+    let n: i64 = len(x) as i64;
+    let out: Vec<i64> = vec();
+    let i: i64 = 0;
+    while i < n {
+        push(mut ref out, x[i]);
+        i = i + 1;
+    }
+    return out;
+}
+
+#[bounded_stack(bytes = 112)]
+fn _copy_f64v(x: ref Vec<f64>) -> Vec<f64> {
+    let n: i64 = len(x) as i64;
+    let out: Vec<f64> = vec();
+    let i: i64 = 0;
+    while i < n {
+        push(mut ref out, x[i]);
+        i = i + 1;
+    }
+    return out;
+}
+
+// ── COO <-> CSR <-> dense conversions ─────────────────────────────────────────
+
+// Converts COO to CSR: sorts entries by (row, col) via insertion sort (fine
+// at this library's modest-nnz scope), sums duplicate (row, col) entries,
+// then builds row_ptr by counting.
+#[bounded_stack(bytes = 545)]
+fn sparse_coo_to_csr(m: ref SparseCOO) -> SparseCSR {
+    let nnz_in: i64 = len(ref m.vals) as i64;
+    let rows: Vec<i64> = _copy_i64(ref m.rows);
+    let cols: Vec<i64> = _copy_i64(ref m.cols);
+    let vals: Vec<f64> = _copy_f64v(ref m.vals);
+
+    let i: i64 = 1;
+    while i < nnz_in {
+        let r: i64 = rows[i];
+        let c: i64 = cols[i];
+        let v: f64 = vals[i];
+        let j: i64 = i - 1;
+        while j >= 0 {
+            let after: bool = rows[j] > r || (rows[j] == r && cols[j] > c);
+            if after {
+                set(mut ref rows, j + 1, rows[j]);
+                set(mut ref cols, j + 1, cols[j]);
+                set(mut ref vals, j + 1, vals[j]);
+                j = j - 1;
+            } else {
+                break;
+            }
+        }
+        set(mut ref rows, j + 1, r);
+        set(mut ref cols, j + 1, c);
+        set(mut ref vals, j + 1, v);
+        i = i + 1;
+    }
+
+    let out_rows: Vec<i64> = vec();
+    let out_cols: Vec<i64> = vec();
+    let out_vals: Vec<f64> = vec();
+    i = 0;
+    while i < nnz_in {
+        let r2: i64 = rows[i];
+        let c2: i64 = cols[i];
+        let sum: f64 = vals[i];
+        let k: i64 = i + 1;
+        while k < nnz_in {
+            if rows[k] == r2 && cols[k] == c2 {
+                sum = sum + vals[k];
+                k = k + 1;
+            } else {
+                break;
+            }
+        }
+        push(mut ref out_rows, r2);
+        push(mut ref out_cols, c2);
+        push(mut ref out_vals, sum);
+        i = k;
+    }
+
+    let nnz: i64 = len(ref out_vals) as i64;
+    let row_ptr: Vec<i64> = vec();
+    let ri: i64 = 0;
+    while ri <= m.n_rows {
+        push(mut ref row_ptr, 0);
+        ri = ri + 1;
+    }
+    let e: i64 = 0;
+    while e < nnz {
+        let rr: i64 = out_rows[e];
+        set(mut ref row_ptr, rr + 1, row_ptr[rr + 1] + 1);
+        e = e + 1;
+    }
+    ri = 0;
+    while ri < m.n_rows {
+        set(mut ref row_ptr, ri + 1, row_ptr[ri + 1] + row_ptr[ri]);
+        ri = ri + 1;
+    }
+
+    return SparseCSR { row_ptr: row_ptr, col_idx: out_cols, vals: out_vals, n_rows: m.n_rows, n_cols: m.n_cols };
+}
+
+// Materializes a CSR matrix as a dense row-major Vec<f64>, matching
+// vani-matrix's flat encoding exactly (interoperable with any vani-matrix
+// function).
+#[bounded_stack(bytes = 168)]
+fn sparse_csr_to_dense(m: ref SparseCSR) -> Vec<f64> {
+    let out: Vec<f64> = vec();
+    let total: i64 = m.n_rows * m.n_cols;
+    let z: i64 = 0;
+    while z < total {
+        push(mut ref out, 0.0);
+        z = z + 1;
+    }
+    let i: i64 = 0;
+    while i < m.n_rows {
+        let s: i64 = m.row_ptr[i];
+        let e: i64 = m.row_ptr[i + 1];
+        let k: i64 = s;
+        while k < e {
+            let c: i64 = m.col_idx[k];
+            set(mut ref out, i * m.n_cols + c, m.vals[k]);
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+// Builds CSR directly from a dense row-major Vec<f64>, skipping entries
+// with |value| <= tol. Useful for interop/testing against vani-matrix.
+#[bounded_stack(bytes = 208)]
+fn sparse_csr_from_dense(A: ref Vec<f64>, n_rows: i64, n_cols: i64, tol: f64) -> SparseCSR {
+    let row_ptr: Vec<i64> = vec(0);
+    let col_idx: Vec<i64> = vec();
+    let vals: Vec<f64> = vec();
+    let i: i64 = 0;
+    while i < n_rows {
+        let j: i64 = 0;
+        while j < n_cols {
+            let v: f64 = A[i * n_cols + j];
+            if abs(v) > tol {
+                push(mut ref col_idx, j);
+                push(mut ref vals, v);
+            }
+            j = j + 1;
+        }
+        push(mut ref row_ptr, len(ref col_idx) as i64);
+        i = i + 1;
+    }
+    return SparseCSR { row_ptr: row_ptr, col_idx: col_idx, vals: vals, n_rows: n_rows, n_cols: n_cols };
+}
+
+// ── Queries ───────────────────────────────────────────────────────────────────
+
+// Number of stored (nonzero) entries.
+#[bounded_stack(bytes = 48)]
+fn sparse_csr_nnz(m: ref SparseCSR) -> i64 {
+    return len(ref m.vals) as i64;
+}
+
+// Single-element lookup, 0.0 if not stored. Linear scan within the row
+// (rows are typically short at this library's scope; col_idx is sorted
+// within each row so a binary search would also work if needed later).
+#[bounded_stack(bytes = 104)]
+fn sparse_csr_get(m: ref SparseCSR, row: i64, col: i64) -> f64 {
+    let s: i64 = m.row_ptr[row];
+    let e: i64 = m.row_ptr[row + 1];
+    let k: i64 = s;
+    while k < e {
+        if m.col_idx[k] == col {
+            return m.vals[k];
+        }
+        k = k + 1;
+    }
+    return 0.0;
+}
+
+// Main diagonal as a dense Vec<f64> of length min(n_rows, n_cols).
+#[bounded_stack(bytes = 168)]
+fn sparse_csr_diagonal(m: ref SparseCSR) -> Vec<f64> {
+    let n: i64 = m.n_rows;
+    if m.n_cols < n {
+        n = m.n_cols;
+    }
+    let out: Vec<f64> = vec();
+    let i: i64 = 0;
+    while i < n {
+        let s: i64 = m.row_ptr[i];
+        let e: i64 = m.row_ptr[i + 1];
+        let k: i64 = s;
+        let v: f64 = 0.0;
+        while k < e {
+            if m.col_idx[k] == i {
+                v = m.vals[k];
+            }
+            k = k + 1;
+        }
+        push(mut ref out, v);
+        i = i + 1;
+    }
+    return out;
+}
+
+// ── Operations ────────────────────────────────────────────────────────────────
+
+// Sparse matrix-vector product: O(nnz), the single most important sparse
+// operation (vs. O(n_rows*n_cols) for a dense mat_vec_mul).
+#[bounded_stack(bytes = 160)]
+fn sparse_csr_matvec(m: ref SparseCSR, x: ref Vec<f64>) -> Vec<f64> {
+    let out: Vec<f64> = vec();
+    let i: i64 = 0;
+    while i < m.n_rows {
+        let s: i64 = m.row_ptr[i];
+        let e: i64 = m.row_ptr[i + 1];
+        let acc: f64 = 0.0;
+        let k: i64 = s;
+        while k < e {
+            acc = acc + m.vals[k] * x[m.col_idx[k]];
+            k = k + 1;
+        }
+        push(mut ref out, acc);
+        i = i + 1;
+    }
+    return out;
+}
+
+// Transpose, via COO round-trip (swap row/col of every entry, re-sort).
+#[bounded_stack(bytes = 697)]
+fn sparse_csr_transpose(m: ref SparseCSR) -> SparseCSR {
+    let coo: SparseCOO = sparse_coo_new(m.n_cols, m.n_rows);
+    let i: i64 = 0;
+    while i < m.n_rows {
+        let s: i64 = m.row_ptr[i];
+        let e: i64 = m.row_ptr[i + 1];
+        let k: i64 = s;
+        while k < e {
+            sparse_coo_push(mut ref coo, m.col_idx[k], i, m.vals[k]);
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return sparse_coo_to_csr(ref coo);
+}
+
+// Scalar multiply: every stored value times s (structure unchanged).
+#[bounded_stack(bytes = 288)]
+fn sparse_csr_scale(m: ref SparseCSR, s: f64) -> SparseCSR {
+    let vals: Vec<f64> = vec();
+    let n: i64 = len(ref m.vals) as i64;
+    let i: i64 = 0;
+    while i < n {
+        push(mut ref vals, m.vals[i] * s);
+        i = i + 1;
+    }
+    let row_ptr: Vec<i64> = _copy_i64(ref m.row_ptr);
+    let col_idx: Vec<i64> = _copy_i64(ref m.col_idx);
+    return SparseCSR { row_ptr: row_ptr, col_idx: col_idx, vals: vals, n_rows: m.n_rows, n_cols: m.n_cols };
+}
+
+// Elementwise sum of two same-shape sparse matrices, via COO round-trip
+// (concatenate both matrices' entries, let sparse_coo_to_csr's duplicate-
+// summing do the addition).
+#[bounded_stack(bytes = 737)]
+fn sparse_csr_add(a: ref SparseCSR, b: ref SparseCSR) -> SparseCSR {
+    let coo: SparseCOO = sparse_coo_new(a.n_rows, a.n_cols);
+    let i: i64 = 0;
+    while i < a.n_rows {
+        let sa: i64 = a.row_ptr[i];
+        let ea: i64 = a.row_ptr[i + 1];
+        let ka: i64 = sa;
+        while ka < ea {
+            sparse_coo_push(mut ref coo, i, a.col_idx[ka], a.vals[ka]);
+            ka = ka + 1;
+        }
+        let sb: i64 = b.row_ptr[i];
+        let eb: i64 = b.row_ptr[i + 1];
+        let kb: i64 = sb;
+        while kb < eb {
+            sparse_coo_push(mut ref coo, i, b.col_idx[kb], b.vals[kb]);
+            kb = kb + 1;
+        }
+        i = i + 1;
+    }
+    return sparse_coo_to_csr(ref coo);
+}
+
+// Sparse-sparse matrix multiply via Gustavson's algorithm: for each row of
+// a, accumulate a[i,l] * (row l of b) into a dense length-n_cols
+// accumulator, then compress the nonzero entries into the output row and
+// reset the touched slots. See file header for the scaling tradeoff this
+// implies.
+#[bounded_stack(bytes = 817)]
+fn sparse_csr_matmul(a: ref SparseCSR, b: ref SparseCSR) -> SparseCSR {
+    let coo: SparseCOO = sparse_coo_new(a.n_rows, b.n_cols);
+    let acc: Vec<f64> = vec();
+    let z: i64 = 0;
+    while z < b.n_cols {
+        push(mut ref acc, 0.0);
+        z = z + 1;
+    }
+    let i: i64 = 0;
+    while i < a.n_rows {
+        let sa: i64 = a.row_ptr[i];
+        let ea: i64 = a.row_ptr[i + 1];
+        let ka: i64 = sa;
+        while ka < ea {
+            let l: i64 = a.col_idx[ka];
+            let a_val: f64 = a.vals[ka];
+            let sb: i64 = b.row_ptr[l];
+            let eb: i64 = b.row_ptr[l + 1];
+            let kb: i64 = sb;
+            while kb < eb {
+                let j: i64 = b.col_idx[kb];
+                set(mut ref acc, j, acc[j] + a_val * b.vals[kb]);
+                kb = kb + 1;
+            }
+            ka = ka + 1;
+        }
+        let j2: i64 = 0;
+        while j2 < b.n_cols {
+            if abs(acc[j2]) > 1.0e-300 {
+                sparse_coo_push(mut ref coo, i, j2, acc[j2]);
+                set(mut ref acc, j2, 0.0);
+            }
+            j2 = j2 + 1;
+        }
+        i = i + 1;
+    }
+    return sparse_coo_to_csr(ref coo);
+}

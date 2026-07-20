@@ -1,0 +1,83 @@
+// Tests for sparse operations, each cross-checked against the equivalent
+// dense vani-matrix operation -- the strongest correctness check available
+// for sparse code (see README).
+// Run with:  vanic test tests/test_ops.vani
+
+use "../src/lib.vani";
+use "../vendor/matrix/src/lib.vani";
+
+fn close(a: f64, b: f64) -> bool {
+    return abs(a - b) < 1.0e-9;
+}
+
+fn main() -> i64 {
+    let coo: SparseCOO = sparse_coo_new(3, 3);
+    sparse_coo_push(mut ref coo, 0, 0, 1.0);
+    sparse_coo_push(mut ref coo, 0, 2, 2.0);
+    sparse_coo_push(mut ref coo, 1, 1, 3.0);
+    sparse_coo_push(mut ref coo, 2, 0, 4.0);
+    sparse_coo_push(mut ref coo, 2, 2, 5.0);
+    let csr: SparseCSR = sparse_coo_to_csr(ref coo);
+    let dense: Vec<f64> = sparse_csr_to_dense(ref csr);
+
+    // matvec vs dense mat_vec_mul.
+    let x: Vec<f64> = vec();
+    push(mut ref x, 1.0); push(mut ref x, 1.0); push(mut ref x, 1.0);
+    let y: Vec<f64> = sparse_csr_matvec(ref csr, ref x);
+    let y_dense: Vec<f64> = mat_vec_mul(ref dense, ref x, 3, 3);
+    let i: i64 = 0;
+    while i < 3 {
+        assert close(y[i], y_dense[i]);
+        i = i + 1;
+    }
+
+    // transpose vs dense mat_transpose.
+    let csrT: SparseCSR = sparse_csr_transpose(ref csr);
+    let denseT: Vec<f64> = sparse_csr_to_dense(ref csrT);
+    let denseT_expected: Vec<f64> = mat_transpose(ref dense, 3, 3);
+    i = 0;
+    while i < 9 {
+        assert close(denseT[i], denseT_expected[i]);
+        i = i + 1;
+    }
+
+    // scale vs dense scalar multiply.
+    let scaled: SparseCSR = sparse_csr_scale(ref csr, 2.0);
+    let denseScaled: Vec<f64> = sparse_csr_to_dense(ref scaled);
+    i = 0;
+    while i < 9 {
+        assert close(denseScaled[i], dense[i] * 2.0);
+        i = i + 1;
+    }
+
+    // add (A + A) vs dense 2*A.
+    let summed: SparseCSR = sparse_csr_add(ref csr, ref csr);
+    let denseSum: Vec<f64> = sparse_csr_to_dense(ref summed);
+    i = 0;
+    while i < 9 {
+        assert close(denseSum[i], dense[i] * 2.0);
+        i = i + 1;
+    }
+
+    // matmul (A*A) vs dense mat_mul.
+    let prod: SparseCSR = sparse_csr_matmul(ref csr, ref csr);
+    let denseProd: Vec<f64> = sparse_csr_to_dense(ref prod);
+    let denseProdExpected: Vec<f64> = mat_mul(ref dense, ref dense, 3);
+    i = 0;
+    while i < 9 {
+        assert close(denseProd[i], denseProdExpected[i]);
+        i = i + 1;
+    }
+
+    // Composed check: (A * identity) must equal A.
+    let id: SparseCSR = sparse_identity_csr(3);
+    let prod_id: SparseCSR = sparse_csr_matmul(ref csr, ref id);
+    let dense_prod_id: Vec<f64> = sparse_csr_to_dense(ref prod_id);
+    i = 0;
+    while i < 9 {
+        assert close(dense_prod_id[i], dense[i]);
+        i = i + 1;
+    }
+
+    return 0;
+}

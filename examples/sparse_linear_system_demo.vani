@@ -1,0 +1,58 @@
+// Builds a sparse tridiagonal matrix (the kind that shows up constantly in
+// finite-difference discretizations, e.g. vani-pde's 1D Laplace solver),
+// solves A*x = b by converting to dense and calling vani-matrix's
+// mat_solve (this package doesn't include a sparse solver in v0.1.0), then
+// verifies the solution with sparse_csr_matvec directly on the sparse
+// matrix -- no densification needed for that check.
+//
+// Run with:  vanic run examples/sparse_linear_system_demo.vani
+
+use "../src/lib.vani";
+use "../vendor/matrix/src/lib.vani";
+
+fn main() -> i64 {
+    let n: i64 = 6;
+    let coo: SparseCOO = sparse_coo_new(n, n);
+    let i: i64 = 0;
+    while i < n {
+        sparse_coo_push(mut ref coo, i, i, 2.0);
+        if i > 0 {
+            sparse_coo_push(mut ref coo, i, i - 1, 0.0 - 1.0);
+        }
+        if i < n - 1 {
+            sparse_coo_push(mut ref coo, i, i + 1, 0.0 - 1.0);
+        }
+        i = i + 1;
+    }
+    let A: SparseCSR = sparse_coo_to_csr(ref coo);
+
+    print "nnz of the tridiagonal matrix (expect 3*n - 2 = 16):";
+    print sparse_csr_nnz(ref A);
+
+    let b: Vec<f64> = vec();
+    i = 0;
+    while i < n {
+        push(mut ref b, 1.0);
+        i = i + 1;
+    }
+
+    let dense_A: Vec<f64> = sparse_csr_to_dense(ref A);
+    let x: Vec<f64> = mat_solve(ref dense_A, ref b, n);
+
+    print "solution x:";
+    i = 0;
+    while i < n {
+        print x[i];
+        i = i + 1;
+    }
+
+    print "residual A*x - b, checked via sparse_csr_matvec (should be ~0):";
+    let Ax: Vec<f64> = sparse_csr_matvec(ref A, ref x);
+    i = 0;
+    while i < n {
+        print Ax[i] - b[i];
+        i = i + 1;
+    }
+
+    return 0;
+}

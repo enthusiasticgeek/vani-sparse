@@ -1,0 +1,10 @@
+[package]
+name    = "sparse"
+version = "0.1.0"
+entry   = "src/lib.vani"
+authors = "enthusiasticgeek"
+license = "MIT"
+registry = "kosh"
+
+[deps]
+matrix = { path = "./vendor/matrix", version = "^0.2.0" }

@@ -1,0 +1,66 @@
+// Tests for COO/CSR construction, conversion, and queries.
+// Run with:  vanic test tests/test_coo_csr.vani
+
+use "../src/lib.vani";
+
+fn close(a: f64, b: f64) -> bool {
+    return abs(a - b) < 1.0e-9;
+}
+
+fn main() -> i64 {
+    // Duplicate (row, col) entries must be summed on conversion to CSR.
+    let coo: SparseCOO = sparse_coo_new(3, 3);
+    sparse_coo_push(mut ref coo, 0, 0, 5.0);
+    sparse_coo_push(mut ref coo, 1, 2, 3.0);
+    sparse_coo_push(mut ref coo, 2, 1, 7.0);
+    sparse_coo_push(mut ref coo, 0, 0, 2.0);
+    sparse_coo_push(mut ref coo, 1, 0, 9.0);
+
+    let csr: SparseCSR = sparse_coo_to_csr(ref coo);
+    assert sparse_csr_nnz(ref csr) == 4;
+    assert csr.row_ptr[0] == 0;
+    assert csr.row_ptr[1] == 1;
+    assert csr.row_ptr[2] == 3;
+    assert csr.row_ptr[3] == 4;
+
+    let dense: Vec<f64> = sparse_csr_to_dense(ref csr);
+    assert close(dense[0], 7.0);
+    assert close(dense[3], 9.0);
+    assert close(dense[5], 3.0);
+    assert close(dense[7], 7.0);
+    assert close(dense[1], 0.0);
+    assert close(dense[4], 0.0);
+
+    // Query functions.
+    assert close(sparse_csr_get(ref csr, 0, 0), 7.0);
+    assert close(sparse_csr_get(ref csr, 1, 0), 9.0);
+    assert close(sparse_csr_get(ref csr, 0, 1), 0.0);
+
+    // Round trip through dense.
+    let csr2: SparseCSR = sparse_csr_from_dense(ref dense, 3, 3, 1.0e-12);
+    let dense2: Vec<f64> = sparse_csr_to_dense(ref csr2);
+    let i: i64 = 0;
+    while i < 9 {
+        assert close(dense[i], dense2[i]);
+        i = i + 1;
+    }
+    assert sparse_csr_nnz(ref csr2) == sparse_csr_nnz(ref csr);
+
+    // Identity matrix.
+    let id: SparseCSR = sparse_identity_csr(4);
+    assert sparse_csr_nnz(ref id) == 4;
+    let diag_id: Vec<f64> = sparse_csr_diagonal(ref id);
+    i = 0;
+    while i < 4 {
+        assert close(diag_id[i], 1.0);
+        i = i + 1;
+    }
+
+    // Diagonal of a non-identity matrix (row 1's only entry is off-diagonal).
+    let diag: Vec<f64> = sparse_csr_diagonal(ref csr);
+    assert close(diag[0], 7.0);
+    assert close(diag[1], 0.0);
+    assert close(diag[2], 0.0);
+
+    return 0;
+}

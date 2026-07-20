@@ -1,0 +1,42 @@
+// A small directed graph's adjacency matrix, stored sparsely. Demonstrates
+// the classic "A^2 counts 2-step paths" identity: (A*A)[i][j] is the
+// number of length-2 paths from i to j -- computed here entirely with
+// sparse_csr_matmul, no dense matrix ever built.
+//
+// Run with:  vanic run examples/graph_adjacency_demo.vani
+
+use "../src/lib.vani";
+
+fn main() -> i64 {
+    // Graph: 0->1, 0->2, 1->2, 2->0, 2->3, 3->3 (self-loop).
+    let n: i64 = 4;
+    let coo: SparseCOO = sparse_coo_new(n, n);
+    sparse_coo_push(mut ref coo, 0, 1, 1.0);
+    sparse_coo_push(mut ref coo, 0, 2, 1.0);
+    sparse_coo_push(mut ref coo, 1, 2, 1.0);
+    sparse_coo_push(mut ref coo, 2, 0, 1.0);
+    sparse_coo_push(mut ref coo, 2, 3, 1.0);
+    sparse_coo_push(mut ref coo, 3, 3, 1.0);
+    let A: SparseCSR = sparse_coo_to_csr(ref coo);
+
+    print "adjacency matrix nnz (expect 6 edges):";
+    print sparse_csr_nnz(ref A);
+
+    let A2: SparseCSR = sparse_csr_matmul(ref A, ref A);
+    print "A^2 (2-step path counts), dense view:";
+    let dense_A2: Vec<f64> = sparse_csr_to_dense(ref A2);
+    let i: i64 = 0;
+    while i < n {
+        let j: i64 = 0;
+        while j < n {
+            print dense_A2[i * n + j];
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    print "-- e.g. A^2[0][2] should be 1 (0->1->2), A^2[0][0] should be 1 (0->2->0):";
+    print sparse_csr_get(ref A2, 0, 2);
+    print sparse_csr_get(ref A2, 0, 0);
+
+    return 0;
+}
