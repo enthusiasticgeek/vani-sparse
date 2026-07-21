@@ -41,7 +41,8 @@
 // sparse the result is. A CSR-native merge-based algorithm without the
 // dense accumulator would scale better to very wide matrices; not needed
 // yet, see TODO.md.
-use "../vendor/matrix/src/lib.vani";
+// No `use` statement needed: vanic auto-includes every [deps] entry's
+// source before compiling.
 
 struct SparseCOO {
     rows: Vec<i64>,
