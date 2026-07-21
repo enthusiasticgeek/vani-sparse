@@ -43,6 +43,18 @@
 // yet, see TODO.md.
 // No `use` statement needed: vanic auto-includes every [deps] entry's
 // source before compiling.
+//
+// WCET (MAINT-1, added 2026-07-21 -- see kosh-index/ROADMAP.md):
+// sparse_coo_new/sparse_coo_push/sparse_csr_nnz are the only genuinely
+// O(1) functions here (real #[wcet(cycles=N)], vanic check's exact
+// reported worst-case, same discipline as #[bounded_stack]). Every other
+// function loops over a matrix dimension or nnz count, a runtime value --
+// unbounded under the checker's WCET model, documented with a WCET
+// formula comment instead. sparse_coo_to_csr's insertion sort makes
+// several other functions O(nnz^2) via the COO round-trip pattern
+// (transpose, add, matmul) rather than the O(nnz) their operation is
+// conceptually capable of -- see TODO.md for the "not needed yet" call on
+// a tighter algorithm.
 
 struct SparseCOO {
     rows: Vec<i64>,
@@ -64,6 +76,7 @@ struct SparseCSR {
 
 // Empty n_rows x n_cols matrix in COO form, ready for sparse_coo_push.
 #[bounded_stack(bytes = 152)]
+#[wcet(cycles = 256)]
 fn sparse_coo_new(n_rows: i64, n_cols: i64) -> SparseCOO {
     let r: Vec<i64> = vec();
     let c: Vec<i64> = vec();
@@ -76,6 +89,7 @@ fn sparse_coo_new(n_rows: i64, n_cols: i64) -> SparseCOO {
 // substitute); m must be a mut ref parameter, matching vani-matrix's
 // mat_set convention.
 #[bounded_stack(bytes = 72)]
+#[wcet(cycles = 48)]
 fn sparse_coo_push(m: mut ref SparseCOO, row: i64, col: i64, val: f64) -> i64 {
     push(mut ref m.rows, row);
     push(mut ref m.cols, col);
@@ -83,7 +97,8 @@ fn sparse_coo_push(m: mut ref SparseCOO, row: i64, col: i64, val: f64) -> i64 {
     return 0;
 }
 
-// n x n sparse identity matrix, directly in CSR form.
+// n x n sparse identity matrix, directly in CSR form. WCET = 20 + n *
+// ~15 cycles.
 #[bounded_stack(bytes = 160)]
 fn sparse_identity_csr(n: i64) -> SparseCSR {
     let row_ptr: Vec<i64> = vec();
@@ -102,6 +117,7 @@ fn sparse_identity_csr(n: i64) -> SparseCSR {
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
+// WCET = 20 + len(x) * ~10 cycles.
 #[bounded_stack(bytes = 112)]
 fn _copy_i64(x: ref Vec<i64>) -> Vec<i64> {
     let n: i64 = len(x) as i64;
@@ -114,6 +130,7 @@ fn _copy_i64(x: ref Vec<i64>) -> Vec<i64> {
     return out;
 }
 
+// WCET = 20 + len(x) * ~10 cycles.
 #[bounded_stack(bytes = 112)]
 fn _copy_f64v(x: ref Vec<f64>) -> Vec<f64> {
     let n: i64 = len(x) as i64;
@@ -130,7 +147,9 @@ fn _copy_f64v(x: ref Vec<f64>) -> Vec<f64> {
 
 // Converts COO to CSR: sorts entries by (row, col) via insertion sort (fine
 // at this library's modest-nnz scope), sums duplicate (row, col) entries,
-// then builds row_ptr by counting.
+// then builds row_ptr by counting. WCET: insertion sort is O(nnz^2)
+// worst-case, dominating the two subsequent O(nnz) passes -- O(nnz^2)
+// overall in the number of stored entries.
 #[bounded_stack(bytes = 545)]
 fn sparse_coo_to_csr(m: ref SparseCOO) -> SparseCSR {
     let nnz_in: i64 = len(ref m.vals) as i64;
@@ -208,7 +227,8 @@ fn sparse_coo_to_csr(m: ref SparseCOO) -> SparseCSR {
 
 // Materializes a CSR matrix as a dense row-major Vec<f64>, matching
 // vani-matrix's flat encoding exactly (interoperable with any vani-matrix
-// function).
+// function). WCET = 20 + n_rows*n_cols (dense zero-fill) + nnz (scatter
+// stored entries) -- O(n_rows*n_cols).
 #[bounded_stack(bytes = 168)]
 fn sparse_csr_to_dense(m: ref SparseCSR) -> Vec<f64> {
     let out: Vec<f64> = vec();
@@ -235,6 +255,7 @@ fn sparse_csr_to_dense(m: ref SparseCSR) -> Vec<f64> {
 
 // Builds CSR directly from a dense row-major Vec<f64>, skipping entries
 // with |value| <= tol. Useful for interop/testing against vani-matrix.
+// WCET = 20 + n_rows*n_cols * ~10 cycles -- O(n_rows*n_cols).
 #[bounded_stack(bytes = 208)]
 fn sparse_csr_from_dense(A: ref Vec<f64>, n_rows: i64, n_cols: i64, tol: f64) -> SparseCSR {
     let row_ptr: Vec<i64> = vec(0);
@@ -261,6 +282,7 @@ fn sparse_csr_from_dense(A: ref Vec<f64>, n_rows: i64, n_cols: i64, tol: f64) ->
 
 // Number of stored (nonzero) entries.
 #[bounded_stack(bytes = 48)]
+#[wcet(cycles = 9)]
 fn sparse_csr_nnz(m: ref SparseCSR) -> i64 {
     return len(ref m.vals) as i64;
 }
@@ -268,6 +290,7 @@ fn sparse_csr_nnz(m: ref SparseCSR) -> i64 {
 // Single-element lookup, 0.0 if not stored. Linear scan within the row
 // (rows are typically short at this library's scope; col_idx is sorted
 // within each row so a binary search would also work if needed later).
+// WCET = 20 + (row length) * ~8 cycles.
 #[bounded_stack(bytes = 104)]
 fn sparse_csr_get(m: ref SparseCSR, row: i64, col: i64) -> f64 {
     let s: i64 = m.row_ptr[row];
@@ -283,6 +306,8 @@ fn sparse_csr_get(m: ref SparseCSR, row: i64, col: i64) -> f64 {
 }
 
 // Main diagonal as a dense Vec<f64> of length min(n_rows, n_cols).
+// WCET = 20 + min(n_rows,n_cols) rows * (row length) -- O(nnz) in total
+// since row lengths sum to nnz across the whole matrix.
 #[bounded_stack(bytes = 168)]
 fn sparse_csr_diagonal(m: ref SparseCSR) -> Vec<f64> {
     let n: i64 = m.n_rows;
@@ -311,7 +336,8 @@ fn sparse_csr_diagonal(m: ref SparseCSR) -> Vec<f64> {
 // ── Operations ────────────────────────────────────────────────────────────────
 
 // Sparse matrix-vector product: O(nnz), the single most important sparse
-// operation (vs. O(n_rows*n_cols) for a dense mat_vec_mul).
+// operation (vs. O(n_rows*n_cols) for a dense mat_vec_mul). WCET =
+// 20 + n_rows + nnz * ~10 cycles.
 #[bounded_stack(bytes = 160)]
 fn sparse_csr_matvec(m: ref SparseCSR, x: ref Vec<f64>) -> Vec<f64> {
     let out: Vec<f64> = vec();
@@ -332,6 +358,8 @@ fn sparse_csr_matvec(m: ref SparseCSR, x: ref Vec<f64>) -> Vec<f64> {
 }
 
 // Transpose, via COO round-trip (swap row/col of every entry, re-sort).
+// WCET: O(nnz) to rebuild the COO form + sparse_coo_to_csr's O(nnz^2)
+// insertion sort -- O(nnz^2) overall, same as sparse_coo_to_csr.
 #[bounded_stack(bytes = 697)]
 fn sparse_csr_transpose(m: ref SparseCSR) -> SparseCSR {
     let coo: SparseCOO = sparse_coo_new(m.n_cols, m.n_rows);
@@ -350,6 +378,8 @@ fn sparse_csr_transpose(m: ref SparseCSR) -> SparseCSR {
 }
 
 // Scalar multiply: every stored value times s (structure unchanged).
+// WCET = 20 + nnz * ~10 + 2 * _copy_i64 (each O(nnz) or O(n_rows)) --
+// O(nnz).
 #[bounded_stack(bytes = 288)]
 fn sparse_csr_scale(m: ref SparseCSR, s: f64) -> SparseCSR {
     let vals: Vec<f64> = vec();
@@ -366,7 +396,9 @@ fn sparse_csr_scale(m: ref SparseCSR, s: f64) -> SparseCSR {
 
 // Elementwise sum of two same-shape sparse matrices, via COO round-trip
 // (concatenate both matrices' entries, let sparse_coo_to_csr's duplicate-
-// summing do the addition).
+// summing do the addition). WCET: O(nnz_a + nnz_b) to rebuild the COO
+// form + sparse_coo_to_csr's O(nnz^2) insertion sort -- O(nnz^2) overall
+// where nnz = nnz_a + nnz_b.
 #[bounded_stack(bytes = 737)]
 fn sparse_csr_add(a: ref SparseCSR, b: ref SparseCSR) -> SparseCSR {
     let coo: SparseCOO = sparse_coo_new(a.n_rows, a.n_cols);
@@ -395,7 +427,11 @@ fn sparse_csr_add(a: ref SparseCSR, b: ref SparseCSR) -> SparseCSR {
 // a, accumulate a[i,l] * (row l of b) into a dense length-n_cols
 // accumulator, then compress the nonzero entries into the output row and
 // reset the touched slots. See file header for the scaling tradeoff this
-// implies.
+// implies. WCET: O(n_rows_a) rows, each accumulating into an O(n_cols_b)
+// dense row via up to (row length of a) * (row length of b's rows
+// touched) work, then sparse_coo_to_csr's O(nnz_out^2) insertion sort on
+// the result -- dominated by O(nnz_out^2) at this library's scope, same
+// as every other COO-round-trip operation here.
 #[bounded_stack(bytes = 817)]
 fn sparse_csr_matmul(a: ref SparseCSR, b: ref SparseCSR) -> SparseCSR {
     let coo: SparseCOO = sparse_coo_new(a.n_rows, b.n_cols);

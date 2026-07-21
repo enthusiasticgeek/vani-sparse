@@ -1,6 +1,6 @@
 [package]
 name    = "sparse"
-version = "0.1.1"
+version = "0.1.2"
 entry   = "src/lib.vani"
 authors = "enthusiasticgeek"
 license = "MIT"
