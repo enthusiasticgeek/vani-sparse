@@ -58,6 +58,30 @@
 
 ---
 
+## v0.1.3 (2026-07-27)
+
+- [x] `sparse_csr_get` switched from a linear scan to binary search within
+      the row, relying on `col_idx`'s existing per-row-sorted invariant.
+      `#[bounded_stack(bytes = 120)]`, `vanic check`'s exact reported
+      worst-case. New boundary-case assertions in `tests/test_coo_csr.vani`
+      (first/last/missing-between column in a 2-entry row, missing
+      before/after in a 1-entry row). Full suite + `vanic audit-safety`
+      re-verified on both backends.
+- [x] Incidental fix while re-verifying: `sparse_coo_new`'s
+      `#[wcet(cycles=256)]` had drifted 1 cycle out of date relative to
+      the current compiler's static estimate (257) -- pre-existing,
+      unrelated to the binary-search change, blocked `vanic check` from
+      passing cleanly until corrected.
+
+**Known but NOT fixed in this pass**: `tests/test_ops.vani` fails
+`vanic check` -- pre-existing, unrelated to `sparse_csr_get`. It calls
+`mat_vec_mul`/`mat_transpose`/`mat_mul` unqualified, but vani-matrix (or
+the compiler's own name resolution) now requires the `matrix::` module
+qualifier for calls into a `[deps]` package -- same convention documented
+in `vani-probability`'s `mlr_fit` (`matrix::mat_transpose` etc.). This
+predates today's change (confirmed via `git stash` against the unmodified
+file) and needs its own pass to update every call site in that file.
+
 ## Future
 
 No v0.2.0 is currently planned. Candidates if a concrete need shows up: a
@@ -66,7 +90,5 @@ CSR-native `sparse_csr_matmul` that avoids the dense per-row accumulator
 sparse LU or conjugate gradient for symmetric positive-definite systems --
 `examples/sparse_linear_system_demo.vani` currently densifies and calls
 vani-matrix's dense `mat_solve`, which defeats the point of sparsity for
-genuinely large systems), a CSC (compressed sparse column) format for
-column-oriented algorithms, and binary search in `sparse_csr_get` (currently
-a linear scan within each row -- fine at this library's scope since
-`col_idx` is already sorted per row if a faster lookup is ever needed).
+genuinely large systems), and a CSC (compressed sparse column) format for
+column-oriented algorithms.

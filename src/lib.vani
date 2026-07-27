@@ -76,7 +76,7 @@ struct SparseCSR {
 
 // Empty n_rows x n_cols matrix in COO form, ready for sparse_coo_push.
 #[bounded_stack(bytes = 152)]
-#[wcet(cycles = 256)]
+#[wcet(cycles = 257)]
 fn sparse_coo_new(n_rows: i64, n_cols: i64) -> SparseCOO {
     let r: Vec<i64> = vec();
     let c: Vec<i64> = vec();
@@ -287,20 +287,25 @@ fn sparse_csr_nnz(m: ref SparseCSR) -> i64 {
     return len(ref m.vals) as i64;
 }
 
-// Single-element lookup, 0.0 if not stored. Linear scan within the row
-// (rows are typically short at this library's scope; col_idx is sorted
-// within each row so a binary search would also work if needed later).
-// WCET = 20 + (row length) * ~8 cycles.
-#[bounded_stack(bytes = 104)]
+// Single-element lookup, 0.0 if not stored. Binary search within the row
+// (col_idx is sorted within each row, per this struct's own invariant --
+// see the module header). WCET = 20 + log2(row length) * ~12 cycles.
+#[bounded_stack(bytes = 120)]
 fn sparse_csr_get(m: ref SparseCSR, row: i64, col: i64) -> f64 {
-    let s: i64 = m.row_ptr[row];
-    let e: i64 = m.row_ptr[row + 1];
-    let k: i64 = s;
-    while k < e {
-        if m.col_idx[k] == col {
-            return m.vals[k];
+    let lo: i64 = m.row_ptr[row];
+    let hi: i64 = m.row_ptr[row + 1] - 1;
+    while lo <= hi {
+        let mid: i64 = lo + (hi - lo) / 2;
+        let mid_col: i64 = m.col_idx[mid];
+        if mid_col == col {
+            return m.vals[mid];
         }
-        k = k + 1;
+        if mid_col < col {
+            lo = mid + 1;
+        }
+        if mid_col > col {
+            hi = mid - 1;
+        }
     }
     return 0.0;
 }
