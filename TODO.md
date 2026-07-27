@@ -73,14 +73,14 @@
       unrelated to the binary-search change, blocked `vanic check` from
       passing cleanly until corrected.
 
-**Known but NOT fixed in this pass**: `tests/test_ops.vani` fails
-`vanic check` -- pre-existing, unrelated to `sparse_csr_get`. It calls
-`mat_vec_mul`/`mat_transpose`/`mat_mul` unqualified, but vani-matrix (or
-the compiler's own name resolution) now requires the `matrix::` module
-qualifier for calls into a `[deps]` package -- same convention documented
-in `vani-probability`'s `mlr_fit` (`matrix::mat_transpose` etc.). This
-predates today's change (confirmed via `git stash` against the unmodified
-file) and needs its own pass to update every call site in that file.
+- [x] `tests/test_ops.vani` fixed (2026-07-27, separate pass): qualified
+      `mat_vec_mul`/`mat_transpose`/`mat_mul` with the `matrix::` module
+      prefix (same convention as `vani-probability`'s `mlr_fit`), and
+      dropped the now-redundant `use "../vendor/matrix/src/lib.vani";`
+      line -- `src/lib.vani`'s own `[deps]` entry already auto-includes
+      vendored `matrix` source, matching every other consumer package
+      (e.g. `vani-pde`'s tests). No `src/lib.vani` change, so no version
+      bump / republish needed -- test-only fix. Verified on both backends.
 
 ## Future
 
