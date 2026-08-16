@@ -22,6 +22,7 @@ on:
       - "examples/**"
       - "vani.toml"
       - "tools/gen_api_tutorial.py"
+      - "tools/tutorial_extras.json"
       - ".github/workflows/deploy-api-tutorial.yml"
   workflow_dispatch:
 
