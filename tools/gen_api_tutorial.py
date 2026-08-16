@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Generate an mdBook API-reference tutorial from this package's own
+r"""Generate an mdBook API-reference tutorial from this package's own
 source, in the tutorials/ directory (same mdBook layout vani-compiler's
 own tutorials/ uses, so `mdbook build tutorials/` + GitHub Pages just
 works with no per-repo tooling changes).
 
-Pilot for the vani-* ecosystem-wide "publish a tutorial explaining
-every function, with a real example" CI idea. Deliberately mechanical,
-not hand-authored prose: vāṇी has no formal doc-comment syntax and no
-`vanic doc` extractor as of this writing, so this script does NOT
-invent explanations. It extracts two things that already exist in the
-source, verbatim:
+Ecosystem-wide "publish a tutorial explaining every function, with a
+real example" CI idea, rolled out to every vani-* package. Mostly
+mechanical, not hand-authored prose: vāṇी has no formal doc-comment
+syntax and no `vanic doc` extractor as of this writing, so per-function
+text is EXTRACTED from the source, verbatim, not invented:
 
   1. The plain `//` comment block immediately preceding each `fn`
      (this package's own existing informal doc-comment convention --
@@ -24,18 +23,48 @@ above this function" / "no usage example found"), not papered over --
 the point is to surface real documentation debt, not manufacture the
 appearance of completeness.
 
+The one deliberate exception to "extract, don't invent": an optional
+tools/tutorial_extras.json sidecar, hand-authored ONCE per package
+(like book.toml -- scaffolded, not regenerated), supplying:
+
+  - "why_use_this": a short paragraph explaining what real problem the
+    package solves and when to reach for it -- the one thing a bare
+    signature+example reference genuinely can't answer on its own.
+    Rendered on the index page.
+  - "math_notes": a {function_name: LaTeX string} map for the
+    functions whose behavior is naturally a formula (e.g. a sparse
+    matrix-vector product, a numerical-integration rule) -- authored
+    by reading the actual algorithm, not invented notation. Rendered
+    as a "**Math**" block under that function's section, using
+    MathJax's \( \) / \[ \] delimiters (book.toml enables
+    mathjax-support). Functions without an entry get no Math block --
+    most functions (constructors, accessors, plumbing) don't need one.
+
+    Author math_notes entries with NORMAL, single-backslash LaTeX
+    (`\( y = Ax \)`, `\sum_{j}`, `\text{rows}`, `\,`, etc.) -- do NOT
+    hand-double the backslashes. `escape_latex_for_markdown()` below
+    does that mechanically at render time, because mdBook's CommonMark
+    renderer otherwise silently strips a single backslash before any
+    ASCII punctuation character (confirmed against a real build: `\(`
+    in the source becomes bare `(` in the output, breaking MathJax,
+    unless the generator doubles it first). Backslash-before-LETTER
+    (`\sum`, `\text`, ...) is untouched by CommonMark either way.
+
 Regenerate with:
     python3 tools/gen_api_tutorial.py
 
 Usage: run from the package root (reads vani.toml's [package].entry).
 Writes tutorials/src/api_reference.md, tutorials/src/index.md,
 tutorials/src/SUMMARY.md, and tutorials/book.toml. Safe to re-run --
-fully regenerates all four files from current source state each time.
-Do not hand-edit the generated files; edit the // comments in
-src/lib.vani (or the source signatures/tests) instead and re-run.
+fully regenerates the three src/*.md files from current source state
+each time (book.toml and tutorial_extras.json are scaffolded once and
+left alone). Do not hand-edit the generated src/*.md files; edit the
+// comments in src/lib.vani (or tutorial_extras.json for the two
+hand-authored fields) and re-run.
 """
 
 import glob
+import json
 import os
 import re
 import sys
@@ -140,6 +169,42 @@ def extract_structs(src_path):
     return structs
 
 
+def read_extras():
+    """Optional hand-authored sidecar -- see module docstring. Missing
+    file is fine (returns empty defaults); malformed JSON is a hard
+    error (fail loud on a typo rather than silently dropping content)."""
+    path = os.path.join(ROOT, "tools", "tutorial_extras.json")
+    if not os.path.isfile(path):
+        return {"why_use_this": None, "math_notes": {}}
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return {
+        "why_use_this": data.get("why_use_this"),
+        "math_notes": data.get("math_notes", {}),
+    }
+
+
+# CommonMark's escapable-ASCII-punctuation set (pulldown-cmark, mdBook's
+# markdown engine, follows this). A backslash immediately before one of
+# these is silently CONSUMED by the renderer -- the backslash disappears
+# from the output HTML, only the punctuation character survives -- unless
+# the source doubles it. LaTeX leans on backslash+punctuation constantly
+# (`\(`, `\)`, `\[`, `\]`, `\,`, `\{`, `\}`, `\_`, ...), so hand-authored
+# `math_notes` in tutorial_extras.json are written with NORMAL single-
+# backslash LaTeX and this function mechanically doubles the punctuation-
+# preceding ones at render time -- backslash-before-LETTER (`\sum`,
+# `\text`, `\times`, `\cdot`, `\min`, `\in`, ...) is untouched by
+# CommonMark and left alone. Confirmed empirically against a real mdBook
+# build: single backslash before `(` is stripped; double survives as a
+# single literal backslash in the output, which is what MathJax expects.
+_MD_PUNCT = re.escape(r"""!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~""")
+_ESCAPE_FOR_MARKDOWN_RE = re.compile(r"\\(?=[" + _MD_PUNCT + r"])")
+
+
+def escape_latex_for_markdown(s):
+    return _ESCAPE_FOR_MARKDOWN_RE.sub(r"\\\\", s)
+
+
 def find_example(fn_name):
     """First real call site for `fn_name` in tests/ then examples/,
     tests searched first as closer-to-ground-truth usage. Returns
@@ -167,7 +232,7 @@ def render_signature_block(name, sig):
     return "```vani\n{}\n```\n".format(sig)
 
 
-def render_function_section(fn):
+def render_function_section(fn, math_notes):
     out = ["## `{}`\n".format(fn["name"])]
     out.append(render_signature_block(fn["name"], fn["signature"]))
     if fn["doc"]:
@@ -177,6 +242,9 @@ def render_function_section(fn):
             "> _No `//` comment found immediately above this function "
             "in the source -- undocumented._\n"
         )
+    if fn["name"] in math_notes:
+        out.append("**Math**:\n")
+        out.append(escape_latex_for_markdown(math_notes[fn["name"]]) + "\n")
     example = find_example(fn["name"])
     if example:
         rel, line_text = example
@@ -216,6 +284,7 @@ def main():
 
     fns = extract_functions(entry_path)
     structs = extract_structs(entry_path)
+    extras = read_extras()
 
     n_documented = sum(1 for f in fns if f["doc"])
     n_with_example = sum(1 for f in fns if find_example(f["name"]))
@@ -243,23 +312,32 @@ def main():
             parts.append(render_struct_section(st))
     parts.append("## Functions\n")
     for fn in fns:
-        section = render_function_section(fn).replace("{gh_slug}", gh_slug)
+        section = render_function_section(fn, extras["math_notes"]).replace(
+            "{gh_slug}", gh_slug
+        )
         parts.append(section)
     with open(os.path.join(src_dir, "api_reference.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(parts))
 
     # --- index.md ---
-    index = [
-        note,
-        "# {} v{}\n".format(meta["name"], meta["version"]),
+    index = [note, "# {} v{}\n".format(meta["name"], meta["version"])]
+    if extras["why_use_this"]:
+        index.append("## Why use this package\n")
+        index.append(extras["why_use_this"] + "\n")
+    else:
+        index.append(
+            "> _No `tools/tutorial_extras.json` `why_use_this` entry yet "
+            "for this package -- see the README instead._\n"
+        )
+    index.append(
         "This is an auto-generated API reference for the `{}` vāṇी "
         "package -- every public function's signature paired with a "
         "real usage example pulled from this package's own tests and "
         "examples, generated by `tools/gen_api_tutorial.py` on every "
-        "push to `main`.\n".format(meta["name"]),
-        "See [API Reference](api_reference.md) for every function.\n",
-        "Source: <https://github.com/{}>\n".format(gh_slug),
-    ]
+        "push to `main`.\n".format(meta["name"])
+    )
+    index.append("See [API Reference](api_reference.md) for every function.\n")
+    index.append("Source: <https://github.com/{}>\n".format(gh_slug))
     with open(os.path.join(src_dir, "index.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(index))
 
@@ -305,8 +383,14 @@ enable = true
 
     print(
         "generated tutorials/src/{{index,api_reference,SUMMARY}}.md -- "
-        "{} functions ({} documented, {} with an example), {} structs".format(
-            len(fns), n_documented, n_with_example, len(structs)
+        "{} functions ({} documented, {} with an example, {} with a math "
+        "note), {} structs, why_use_this: {}".format(
+            len(fns),
+            n_documented,
+            n_with_example,
+            len(extras["math_notes"]),
+            len(structs),
+            "yes" if extras["why_use_this"] else "MISSING",
         )
     )
 
