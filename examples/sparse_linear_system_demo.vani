@@ -37,7 +37,7 @@ fn main() -> i64 {
     }
 
     let dense_A: Vec<f64> = sparse_csr_to_dense(ref A);
-    let x: Vec<f64> = mat_solve(ref dense_A, ref b, n);
+    let x: Vec<f64> = matrix::mat_solve(ref dense_A, ref b, n);
 
     print "solution x:";
     i = 0;
