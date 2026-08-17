@@ -8,6 +8,8 @@ converting to/from a dense vani-matrix matrix and comparing against the
 equivalent dense operation, the strongest correctness check available for
 sparse code. `src/lib.vani` itself is otherwise self-contained.
 
+**API reference / tutorial:** <https://enthusiasticgeek.github.io/vani-sparse/>
+
 ## Add to your project
 
 ```toml
