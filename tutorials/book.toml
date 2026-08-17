@@ -3,8 +3,8 @@
 # unlike src/*.md, this file is NOT regenerated on subsequent runs.
 [book]
 title = "sparse — API Reference"
-authors = ["vāṇी contributors"]
-description = "Auto-generated function-by-function API reference for the sparse vāṇी package."
+authors = ["vāṇī contributors"]
+description = "Auto-generated function-by-function API reference for the sparse vāṇī package."
 language = "en"
 src = "src"
 

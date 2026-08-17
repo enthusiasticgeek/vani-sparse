@@ -1,6 +1,6 @@
 // vani-sparse  v0.1.0 — sparse matrix formats and operations
 //
-// IMPORTANT — do NOT reimplement vāṇी compiler builtins.
+// IMPORTANT — do NOT reimplement vāṇī compiler builtins.
 // Already available as builtins (call directly, never redeclare here):
 //   abs  push pop len set vec
 //

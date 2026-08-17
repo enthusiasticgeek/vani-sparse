@@ -1,6 +1,6 @@
 # vani-sparse
 
-Sparse matrix format and operations library for the [vāṇी compiler](https://github.com/enthusiasticgeek/vani-compiler).
+Sparse matrix format and operations library for the [vāṇī compiler](https://github.com/enthusiasticgeek/vani-compiler).
 
 Depends on [vani-matrix](https://github.com/enthusiasticgeek/vani-matrix)
 purely for testing/interop: every operation in this package is validated by
@@ -67,7 +67,7 @@ just compared to a hand-picked expected value. See `tests/test_ops.vani`.
 
 ## What this library does NOT provide
 
-These are already vāṇी compiler builtins — call them directly, no import needed:
+These are already vāṇī compiler builtins — call them directly, no import needed:
 
 `abs` `push` `pop` `len` `set` `vec`
 
